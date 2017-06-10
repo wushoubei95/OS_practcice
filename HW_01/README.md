@@ -56,14 +56,17 @@ $ make install
 CPU核数增加后，运行时间显著减少，内存使用也大幅下降。但我们需要结合test.txt的具体大小去做判断。
 
 五、叙述自己对这些软件技术与具体安装运行过程的看法：
-通过安装，出现问题与解决问题，对mesos与spark的整个框架有了初步的了解。运行在mesos上面和 spark standalone模式的区别是：
+
+通过安装，出现问题与解决问题，对mesos与spark的整个框架有了初步的了解。
+运行在mesos上面和 spark standalone模式的区别是：
   1、stand alone：
   需要自己启动spark master
   需要自己启动spark slaver（即工作的worker）
+  
   2、运行在mesos：
   启动mesos master
   启动mesos slaver
-./sbin/start-mesos-dispatcher.sh -m mesos://127.0.0.1:5050
+  ./sbin/start-mesos-dispatcher.sh -m mesos://127.0.0.1:5050
   启动spark
   配置spark的可执行程序的路径（也就是mesos里面所谓EXECUTOR），提供给mesos下载运行。
   在mesos上面的运行流程：
