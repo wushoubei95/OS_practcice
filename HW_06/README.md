@@ -411,27 +411,25 @@ if __name__ == '__main__':
 	    
 	    #!/usr/bin/env python2.7
 	      
-  from __future__ import print_function
+          from __future__ import print_function
 	        
 	       
 	        
 
-import subprocess
-import sys
-import os
-import uuid
-import time
-import socket
-import signal
-import getpass
-from threading import Thread
-from os.path import abspath, join, dirname
-
-from pymesos import MesosSchedulerDriver, Scheduler, encode_data
-from addict import Dict
-
-TASK_CPU = 0.2
-TASK_MEM = 128
+           import subprocess
+          import sys
+	  import os
+	  import uuid
+	  import time
+	  import socket
+	  import signal
+	  import getpass
+	  from threading import Thread
+	  from os.path import abspath, join, dirname
+	  from pymesos import MesosSchedulerDriver, Scheduler, encode_data
+	  from addict import Dict
+	  TASK_CPU = 0.2
+	  TASK_MEM = 128
         TASK_NUM = 5
 
 
