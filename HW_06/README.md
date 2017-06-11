@@ -407,8 +407,14 @@ if __name__ == '__main__':
   docker build -t etcd_image .
   
   编写框架，在框架中以calico网络启动容器
-#!/usr/bin/env python2.7
-from __future__ import print_function
+            
+	    
+	    #!/usr/bin/env python2.7
+	      
+  from __future__ import print_function
+	        
+	       
+	        
 
 import subprocess
 import sys
@@ -426,12 +432,11 @@ from addict import Dict
 
 TASK_CPU = 0.2
 TASK_MEM = 128
-TASK_NUM = 5
+        TASK_NUM = 5
 
 
 
-class DockerJupyterScheduler(Scheduler):
-
+       class DockerJupyterScheduler(Scheduler):
 	def __init__(self):
 		self.launched_task = 0
 
@@ -513,9 +518,7 @@ class DockerJupyterScheduler(Scheduler):
 		logging.debug('Status update TID %s %s',
 					  update.task_id.value,
 					  update.state)
-
-
-def main(master):
+					  def main(master):
 
 	# Framework info
 	framework = Dict()
@@ -546,8 +549,7 @@ def main(master):
 
 	while driver_thread.is_alive():
 		time.sleep(1)
-
-if __name__ == '__main__':
+	if __name__ == '__main__':
 	import logging
 	logging.basicConfig(level=logging.DEBUG)
 	if len(sys.argv) < 2:
@@ -557,4 +559,4 @@ if __name__ == '__main__':
 		main(sys.argv[1])
 运行该框架
 
-python hw6_scheduler.py zk://172.16.6.192:2181,172.16.6.224:2181,172.16.6.213:2181/mesos
+ python hw6_scheduler.py zk://172.16.6.192:2181,172.16.6.224:2181,172.16.6.213:2181/mesos
