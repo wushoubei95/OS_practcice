@@ -213,3 +213,348 @@ I0529 04:20:11.362989 60163 log.cpp:553] Attempting to start the writer
 这些docker容器可以互相免密码ssh登录，且在host表中的名字从XXX-0一直到XXX-n（XXX是自己取的名字，n是容器数量-1），其中XXX-0是etcd的master节点
 当其中一个容器被杀死时，集群仍满足上一个条件
 当etcd master节点被杀死时，jupyter notebook会转移到新的master节点提供服务，集群仍满足上一个条件。
+
+实现思路：
+
+第一步：在三台主机上以glusterfs实现分布式存储
+
+第二步：通过镜像创建容器，需要在镜像中指定容器的功能：
+
+1、部署etcd
+
+2、容器间互相免密登录
+
+3、循环判断自己是不是master，如果是，部署jupyter notebook
+
+4、维护host表
+
+第三步：挂代理，使得可以从外部访问该集群
+
+第四步：创建framework，以calico网络启动容器
+
+具体流程：
+
+在三台主机上以glusterfs实现分布式存储
+
+# 在三台主机上安装gluterfs
+apt install glusterfs-server
+
+# 分别修改/etc/hosts，下面是1001的例子
+vim /etc/hosts
+127.0.0.1       server1 localhost
+127.0.1.1       oo-lab.cs1cloud.internal        oo-lab
+172.16.6.224    server2
+172.16.6.213    server3
+
+# 创建卷
+mkdir -p /data/brick
+gluster volume create my_volume replica 3 server1:/data/brick server2:/data/brick server3:/data/brick force
+gluster volume start my_volume
+gluster volume info
+
+# 在三台主机上分别创建挂载点，挂载my_volume卷
+mkdir -p /storage2
+mount -t glusterfs server1:/my_volume /storage2
+
+# 部署etcd
+RUN wget -P /root https://github.com/coreos/etcd/releases/download/v3.1.7/etcd-v3.1.7-linux-amd64.tar.gz && tar -zxf /root/etcd-v3.1.7-linux-amd64.tar.gz -C /root
+RUN ln -s /root/etcd-v3.1.7-linux-amd64/etcd /usr/local/bin/etcd && ln -s /root/etcd-v3.1.7-linux-amd64/etcdctl /usr/local/bin/etcdctl
+
+启动etcd，将下段代码写入容器启动后执行的python代码中
+
+def start_etcd(ip_addr):
+    args = ['/usr/local/bin/etcd', '--name', 'node' + ip_addr[-1], \
+    '--data-dir', '/var/lib/etcd', \
+    '--initial-advertise-peer-urls', 'http://' + ip_addr + ':2380', \
+    '--listen-peer-urls', 'http://' + ip_addr + ':2380', \
+    '--listen-client-urls', 'http://' + ip_addr + ':2379,http://127.0.0.1:2379', \
+    '--advertise-client-urls', 'http://' + ip_addr + ':2379', \
+    '--initial-cluster-token', 'etcd-cluster-hw6', \
+    '--initial-cluster', 'node0=http://192.168.0.100:2380,node1=http://192.168.0.101:2380,node2=http://192.168.0.102:2380,node3=http://192.168.0.103:2380,node4=http://192.168.0.104:2380', \
+    '--initial-cluster-state', 'new']
+    subprocess.Popen(args)
+    
+容器间互相免密登录
+涉及到对公钥、私钥的处理，需要在容器启动后共享公钥，修改sshd配置文件
+RUN mkdir /var/run/sshd
+RUN echo 'AuthorizedKeysFile /ssh_info/authorized_keys' >> /etc/ssh/sshd_config
+将下段代码写入容器启动后执行的python代码中
+def password_ssh():
+    # generate ssh private and public key
+	  os.system('ssh-keygen -f /home/admin/.ssh/id_rsa -t rsa -N ""')
+    # add the public key to shared 'authorized_keys' file
+	  os.system('echo "admin" | sudo -S bash -c "cat /home/admin/.ssh/id_rsa.pub >> /ssh_info/authorized_keys"')
+    # start ssh service
+	  os.system('/usr/sbin/service ssh start')
+    
+在master上部署jupyter notebook
+通过一个while循环，不断向etcd集群发送消息，检查自己是否为master，算法如下：
+
+（1）如果是master且是第一次成为master，部署jupyter notebook，删除原来的master宕机后在kv对中留下的/hosts目录，新建kv对/hosts/0192.168.4.10x -> 192.168.4.10x（使用0开头表示是leader）。在分布式kv对中更新/hosts目录的存活时间为30秒，这是为了如果有follower死掉，可以在30秒重新创建/hosts目录然后清除掉死掉的follower信息；对于不是刚刚成为master的情况继续添加host条目
+
+（2）如果是follower，则继续尝试创建kv对/hosts/192.168.4.10x -> 192.168.4.10x
+def main():
+	f = os.popen("ifconfig cali0 | grep 'inet addr' | cut -d ':' -f 2 | cut -d ' ' -f 1")
+	ip_addr = f.read().strip('\n')
+
+	password_ssh()
+	start_etcd(ip_addr)
+
+	leader_flag = 0
+	watch_flag = 0
+	stats_url = 'http://127.0.0.1:2379/v2/stats/self'
+	stats_request = urllib.request.Request(stats_url)
+	while True:
+		try:
+			stats_reponse = urllib.request.urlopen(stats_request)
+
+		except urllib.error.URLError as e:
+			print('[WARN] ', e.reason)
+			print('[WARN] Wating etcd...')
+
+		else:
+			if watch_flag == 0:
+				watch_flag = 1
+				watch_dog(ip_addr)
+
+			stats_json = stats_reponse.read().decode('utf-8')
+			data = json.loads(stats_json)
+
+
+			if data['state'] == 'StateLeader':
+				# first time to be master
+				if leader_flag == 0:
+					leader_flag = 1
+
+					args = ['/usr/local/bin/jupyter', 'notebook', '--NotebookApp.token=', '--ip=0.0.0.0', '--port=8888']
+					subprocess.Popen(args)
+
+					os.system('/usr/local/bin/etcdctl rm /hosts')
+					os.system('/usr/local/bin/etcdctl mk /hosts/0' + ip_addr + ' ' + ip_addr)
+					os.system('/usr/local/bin/etcdctl updatedir --ttl 30 /hosts')
+				# not the first time to be master
+				else:
+					os.system('/usr/local/bin/etcdctl mk /hosts/0' + ip_addr + ' ' + ip_addr)
+
+
+			elif data['state'] == 'StateFollower':
+				# be follower
+				leader_flag = 0
+				os.system('/usr/local/bin/etcdctl mk /hosts/' + ip_addr + ' ' + ip_addr)
+
+		time.sleep(1)
+    
+    维护host表
+上一段代码中调用了host_list函数，该函数新启动一个守护进程触发watch.py，监控/hosts目录的更新变化，检测到有新创建的kv对后，立刻更新hosts文件，已经存在的kv对再创建时不会触发守护进程
+#!/usr/bin/env python3
+
+import subprocess, sys, os, socket, signal, json, fcntl
+import urllib.request, urllib.error
+
+
+
+def edit_hosts():
+	f = os.popen('/usr/local/bin/etcdctl ls --sort --recursive /hosts')
+	hosts_str = f.read()
+
+
+	hosts_arr = hosts_str.strip('\n').split('\n')
+	hosts_fd = open('/tmp/hosts', 'w')
+
+	fcntl.flock(hosts_fd.fileno(), fcntl.LOCK_EX)
+
+	hosts_fd.write('127.0.0.1 localhost cluster' + '\n')
+	i = 0
+	for host_ip in hosts_arr:
+		host_ip = host_ip[host_ip.rfind('/') + 1:]
+		if host_ip[0] == '0':
+			hosts_fd.write(host_ip[1:] + ' cluster-' + str(i) + '\n')
+		else:
+			hosts_fd.write(host_ip + ' cluster-' + str(i) + '\n')
+		i += 1
+
+	hosts_fd.flush()
+	os.system('/bin/cp /tmp/hosts /etc/hosts')
+	hosts_fd.close()
+
+
+def main(ip_addr):
+	action = os.getenv('ETCD_WATCH_ACTION')
+
+	stats_url = 'http://127.0.0.1:2379/v2/stats/self'
+	stats_request = urllib.request.Request(stats_url)
+
+	stats_reponse = urllib.request.urlopen(stats_request)
+	stats_json = stats_reponse.read().decode('utf-8')
+	data = json.loads(stats_json)
+
+	print('[INFO] Processing', action)
+
+	if action == 'expire':
+		if data['state'] == 'StateLeader':
+			os.system('/usr/local/bin/etcdctl mk /hosts/0' + ip_addr + ' ' + ip_addr)
+			os.system('/usr/local/bin/etcdctl updatedir --ttl 30 /hosts')
+
+	elif action == 'create':
+		edit_hosts()
+		if data['state'] == 'StateFollower':
+			os.system('/usr/local/bin/etcdctl mk /hosts/' + ip_addr + ' ' + ip_addr)
+
+if __name__ == '__main__':
+	main(sys.argv[1])
+  以Dockerfile生成etcd_image镜像
+  
+  docker build -t etcd_image .
+  
+  编写框架，在框架中以calico网络启动容器
+#!/usr/bin/env python2.7
+from __future__ import print_function
+
+import subprocess
+import sys
+import os
+import uuid
+import time
+import socket
+import signal
+import getpass
+from threading import Thread
+from os.path import abspath, join, dirname
+
+from pymesos import MesosSchedulerDriver, Scheduler, encode_data
+from addict import Dict
+
+TASK_CPU = 0.2
+TASK_MEM = 128
+TASK_NUM = 5
+
+
+
+class DockerJupyterScheduler(Scheduler):
+
+	def __init__(self):
+		self.launched_task = 0
+
+	def resourceOffers(self, driver, offers):
+		filters = {'refuse_seconds': 5}
+
+		for offer in offers:
+			cpus = self.getResource(offer.resources, 'cpus')
+			mem = self.getResource(offer.resources, 'mem')
+			if self.launched_task == TASK_NUM:
+				return
+			if cpus < TASK_CPU or mem < TASK_MEM:
+				continue
+			# ip
+			ip = Dict()
+			ip.key = 'ip'
+			ip.value = '192.168.4.10' + str(self.launched_task)
+
+			# hostname
+			hostname = Dict()
+			hostname.key = 'hostname'
+			hostname.value = 'cluster'
+
+			# volume1
+			volume1 = Dict()
+			volume1.key = 'volume'
+			volume1.value = '/storage2:/ssh_info'
+
+			# volume2
+			volume2 = Dict()
+			volume2.key = 'volume'
+			volume2.value = '/storage3:/home/admin/shared_folder'
+
+
+			# NetworkInfo
+			NetworkInfo = Dict()
+			NetworkInfo.name = 'my_net'
+
+			# DockerInfo
+			DockerInfo = Dict()
+			DockerInfo.image = 'etcd_image'
+			DockerInfo.network = 'USER'
+			DockerInfo.parameters = [ip, hostname, volume1, volume2]
+
+			# ContainerInfo
+			ContainerInfo = Dict()
+			ContainerInfo.type = 'DOCKER'
+			ContainerInfo.docker = DockerInfo
+			ContainerInfo.network_infos = [NetworkInfo]
+
+			# CommandInfo
+			CommandInfo = Dict()
+			CommandInfo.shell = False
+
+			task = Dict()
+			task_id = 'node' + str(self.launched_task)
+			task.task_id.value = task_id
+			task.agent_id.value = offer.agent_id.value
+			task.name = 'Docker task'
+			task.container = ContainerInfo
+			task.command = CommandInfo
+
+			task.resources = [
+				dict(name='cpus', type='SCALAR', scalar={'value': TASK_CPU}),
+				dict(name='mem', type='SCALAR', scalar={'value': TASK_MEM}),
+			]
+
+			self.launched_task += 1
+			driver.launchTasks(offer.id, [task], filters)
+
+
+	def getResource(self, res, name):
+		for r in res:
+			if r.name == name:
+				return r.scalar.value
+		return 0.0
+
+	def statusUpdate(self, driver, update):
+		logging.debug('Status update TID %s %s',
+					  update.task_id.value,
+					  update.state)
+
+
+def main(master):
+
+	# Framework info
+	framework = Dict()
+	framework.user = getpass.getuser()
+	framework.name = "DockerJupyterFramework"
+	framework.hostname = socket.gethostname()
+
+	# Use default executor
+	driver = MesosSchedulerDriver(
+		DockerJupyterScheduler(),
+		framework,
+		master,
+		use_addict=True,
+	)
+
+	def signal_handler(signal, frame):
+		driver.stop()
+
+
+	def run_driver_thread():
+		driver.run()
+
+	driver_thread = Thread(target=run_driver_thread, args=())
+	driver_thread.start()
+
+	print('Scheduler running, Ctrl+C to quit.')
+	signal.signal(signal.SIGINT, signal_handler)
+
+	while driver_thread.is_alive():
+		time.sleep(1)
+
+if __name__ == '__main__':
+	import logging
+	logging.basicConfig(level=logging.DEBUG)
+	if len(sys.argv) < 2:
+		print("Usage: {} <mesos_master>".format(sys.argv[0]))
+		sys.exit(1)
+	else:
+		main(sys.argv[1])
+运行该框架
+
+python hw6_scheduler.py zk://172.16.6.192:2181,172.16.6.224:2181,172.16.6.213:2181/mesos
